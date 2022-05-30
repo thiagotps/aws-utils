@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+TEMP=$(getopt -o 'p:q:d:l:o:'  -- "$@")
+
+if [ $? -ne 0 ]; then
+    echo 'Terminating...' >&2
+    exit 1
+fi
+
+# Note the quotes around "$TEMP": they are essential!
+eval set -- "$TEMP"
+unset TEMP
+
+database=""
+query=""
+location=""
+output=""
+while true; do
+    case "$1" in
+        '-p')
+            export AWS_PROFILE="$2"
+            shift 2
+            continue
+            ;;
+        '-d')
+            database="$2"
+            shift 2
+            continue
+            ;;
+        '-q')
+            query="$2"
+            shift 2
+            continue
+            ;;
+        '-l')
+            location="$2"
+            shift 2
+            continue
+            ;;
+        '-o')
+            output="$2"
+            shift 2
+            continue
+            ;;
+        '--')
+            shift
+            break
+            ;;
+        *)
+            echo 'Internal error, while processing options.' >&2
+            exit 1
+            ;;
+    esac
+done
+
+[ -z "$database" ] && echo "Missing database." && exit
+[ -z "$location" ] && echo "Missing s3 location." && exit
+[ -z "$output" ] && echo "Missing output location." && exit
+[ -z "$query" ] && echo "Missing query." && exit
+
+echo "Starting execution..."
+    # --work-group "primary" \
+query_id=$(aws athena start-query-execution \
+--query-string "$query" \
+--query-execution-context Database="$database",Catalog=AwsDataCatalog \
+--result-configuration OutputLocation="$location" | jq -r '.QueryExecutionId')
+
+echo "Getting output location..."
+s3loc=$(aws athena get-query-execution --query-execution-id "$query_id" \
+    | jq -r '.QueryExecution.ResultConfiguration.OutputLocation')
+
+bucket=$(echo "${s3loc#s3://}" | cut -d '/' -f 1)
+key="${s3loc#s3://"$bucket"/}"
+
+echo "Wating for bucket ${bucket} with key ${key} to be available..."
+aws s3api wait object-exists --bucket "$bucket" --key "$key"
+echo "Copying result to local file..."
+aws s3 cp "$s3loc" "$output"
